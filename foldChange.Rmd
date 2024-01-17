@@ -1,0 +1,38 @@
+---
+title: "Homework assignment (Journal entry) - Docker"
+output: html_notebook
+---
+
+```{r}
+suppressMessages(library(DESeq2))
+suppressMessages(library(pheatmap))
+# create a 5 by 10 matrix of random integers
+set.seed(0)
+( m <- matrix(sample(1:1000,50), byrow=FALSE, ncol = 10, nrow = 5) )
+# define column names as cond1, cond2, cond3, cond4, cond5, ctrl1, ctrl2, ctrl3, ctrl4, ctrl5
+# define row names as gene1, gene2, gene3 ...
+colnames(m) <- c("cond1","cond2","cond3","cond4","cond5",
+                "ctrl1","ctrl2","ctrl3","ctrl4","ctrl5")
+rownames(m) <- c("gene1","gene2","gene3","gene4","gene5")
+View(m)
+```
+
+
+```{r}
+# Compute the fold change for each gene.
+foldchange <- function(row) {
+  out <- 0
+  for (i in 1:5) {
+    out = out + ( row[i]/row[5+i] ) # hard-coded; compares 1 to 6, 2 to 7 etc.
+  }
+  return(out/5)
+}
+( m_fc <- apply(m, 1, foldchange) )
+( m <- cbind(m,m_fc) )
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
