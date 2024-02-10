@@ -1,0 +1,205 @@
+---
+title: "A1_KohWindsor"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    css: "style.css"
+date: "2024-02-10"
+name: Koh Zhi Cong Windsor 
+bibliography: A1_references.bib
+bibliography-style: plain
+#References
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+This notebook was created by _Koh Zhi Cong Windsor_ using his own made Docker image from Homework Assignment 1. Relevant packages are installed.
+
+```{r, include=FALSE}
+# Loading necessary packages
+
+if (! requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (! requireNamespace("Biobase", quietly = TRUE)) {
+  BiocManager::install("Biobase")
+}
+
+if (! requireNamespace("GEOquery", quietly = TRUE)) {
+  BiocManager::install("GEOquery")
+}
+
+if (!requireNamespace("hgnc", quietly = TRUE)) {
+  install.packages("hgnc")
+}
+
+if (!requireNamespace("edgeR", quietly = TRUE)) {
+  install.packages("edgeR")
+}
+
+library(GEOquery)
+library(hgnc)
+library(edgeR)
+```
+### Brief introduction of study 
+Uveal Melanoma (UM) has no effective treatment once metastatic. UMs frequently exhibit somatic mutations in GNAQ or GNA11 genes [@Chen2014-kv]. In the studythe dataset was obtained from [@Baqai2023-gp], researchers treated GNAQ-mutant UM cell lines with different inhibitors (MEKi or ERKi). They then performed RNA sequencing to elucidate changes in the transcriptome. 
+
+This dataset is of interest to me since I personally suffer from eye related medical conditions. There are also proteomic data associated with this dataset, which would be helpful should I choose to study more and continue further analysis on the proteomic data.
+
+### Downloading data
+The dataset's accession number is GSE228090. The data was downloaded from GEO, and saved to an RData file for easier access. This involved downloading both the metadata as well as the raw counts.
+```{r}
+# Downloading metadata
+acc <- "GSE228090"
+if (! file.exists(paste0(acc,".RData"))) {
+  gset <- GEOquery::getGEO(acc,GSEMatrix =TRUE,getGPL=FALSE)
+  saveRDS(gset, paste0(acc, ".RData"))
+} else {
+  gset <- readRDS(paste0(acc, ".RData"))
+}
+gset <- gset[[1]]
+```
+```{r}
+# Load counts table from GEO
+urld <- "https://www.ncbi.nlm.nih.gov/geo/download/?format=file&type=rnaseq_counts"
+path <- paste(urld, "acc=GSE228090", "file=GSE228090_raw_counts_GRCh38.p13_NCBI.tsv.gz", sep="&");
+if (! file.exists(paste0(acc,"counts.RData"))) {
+  tbl <- as.matrix(data.table::fread(path, header=T, colClasses="integer"), rownames=1)
+  saveRDS(tbl, paste0(acc, "counts.RData"))
+} else {
+  tbl <- readRDS(paste0(acc, "counts.RData"))
+}
+```
+
+### Brief introduction of dataset 
+Some basic information regarding the dataset can be obtained. From the paper, RNA-seq data was obtained by using RSEM to quantify gene and transcript-level expression. The data corresponds to gene expression and not transcript level information. The paper, as well as a quick check via [HGNC](https://www.genenames.org/)[@HGNC], suggests the row names are the entrez ids of genes. 
+```{r}
+gset@experimentData@abstract # study abstract
+gset@experimentData@other$overall_design # summary of experiment
+unique(gset@phenoData@data[["extract_protocol_ch1.1"]]) # platform
+gset@experimentData@other$platform_id # GPL id
+gset@experimentData@other$last_update_date # last update date
+unique(gset@phenoData@data$organism_ch1) # organism
+```
+### Sample Information
+Sample specific information can also be obtained. It is worth noting here that there are 30 samples. 
+
+```{r}
+sampleInfo <- gset@phenoData@data[ , (ncol(gset@phenoData@data)-3):ncol(gset@phenoData@data)] # extract relevant columns
+dim(sampleInfo) # 30 samples
+colnames(sampleInfo) <- gsub(":ch1", "", colnames(sampleInfo)) 
+knitr::kable(sampleInfo[seq(3, nrow(sampleInfo), by = 3), ], format = "pipe", caption = "<b>Table 1:</b> Sample information") # every third replicate of each sample is shown 
+( sapply(sampleInfo, function(x) {unique(x)} ) ) # possible values of each column
+```
+It can be seen that DMSO is the control, while adding MEKi and ERKi are different test groups of the dataset. Specifically, two different MEKi and ERKi are used each, so there a total of 5 different types of treatments. There are two cell lines, and for each cell line treatment, there are up to 3 replicates, labelled S1 to S3. This therefore gives rise to (5 x 2 x 3) 30 samples.
+
+For the purposes of my analysis, I wish to find whether adding MEKi and ERKi causes some genes to be differentially expressed. So, there are 6 samples in control, and 12 samples each for MEKi and ERKi. 
+
+## Data Cleaning
+
+The raw counts data is a table with the columns as the sample names, and the rows as gene identifiers.  Note that there were 30 samples, but only 24 of them have raw counts information. Some samples in the study therefore had no associated data. The intersect function was thus used to find the actual number of samples in each treatment group that had RNA-seq data relevant to it.
+
+```{r}
+knitr::kable(tbl[1:10,1:5], format = "pipe", caption = "<b>Table 2:</b> Raw Counts") # Visually inspect data
+dim(tbl) # There are 24 samples here!
+intersect(colnames(tbl), rownames(sampleInfo[sampleInfo$`treatment type`=='DMSO', ])) # the DMSO samples that have counts
+length(intersect(colnames(tbl), rownames(sampleInfo[sampleInfo$`treatment type`=='MEKi', ]))) # the MEKi samples that have counts
+length(intersect(colnames(tbl), rownames(sampleInfo[sampleInfo$`treatment type`=='ERKi', ]))) # the ERKi samples that have counts
+```
+### Sample removal
+The sample information that do not have corresponding RNA-seq information are filtered out. 
+```{r}
+filtered_sampleInfo = sampleInfo[rownames(sampleInfo) %in% colnames(tbl), ]
+knitr::kable(head(filtered_sampleInfo), caption = "<b>Table 3:</b> Filtered Sample information")
+```
+
+### Quality Checks
+Some initial checks are done to verify the quality of the RNA-seq data, ensuring that there were no duplicate rows, missing values or negative values.
+```{r}
+length(unique(rownames(tbl))) # There are no duplicate rows
+any(is.na(tbl)) # There are no missing values
+any(tbl < 0) # There are no negative values
+```
+### Mapping to HUGO symbols
+To map them to their corresponding gene symbols, a hgnc dataset was used. The hgnc dataset was downloaded programmatically, and up to date as of 30 Jan 1400 (EST). The raw gene counts post-mapping are updated as shown below. 
+```{r, echo=FALSE}
+# download hgnc dataset
+if (! file.exists("hgnc_genes.RData")) {
+  hgnc_genes <- import_hgnc_dataset(file=latest_archive_url()) # as of 30 Jan 1400
+  saveRDS(hgnc_genes, "hgnc_genes.RData")
+} else {
+  hgnc_genes <- readRDS("hgnc_genes.RData")
+}
+rownames(tbl) <-hgnc_genes$symbol[match(rownames(tbl), hgnc_genes$entrez_id)] # mapping of gene symbols
+knitr::kable(tbl[1:10,1:5], format = "pipe", caption = "<b>Table 4:</b> Raw Gene Counts mapped to gene symbols") #Updated row names to gene symbols
+```
+There are some rownames with NA, indicating that the entrez ids of some of these genes do not correspond to any documented gene in the database. These genes are thus removed, which leaves over 29000 genes.
+```{r}
+tbl <- tbl[!is.na(rownames(tbl)), ] # remove rows with NA
+if (length(unique(rownames(tbl))) == dim(tbl)[1]) { # check that all rownames/gene symbols are unique
+  print( dim(tbl) )  # over 29000 unique genes
+} 
+```
+
+## Data Processing
+
+### Filtering low counts
+Some genes may not be expressed at all in any of these samples, and these are filtered out to avoid heavy computation subsequently. Thus, the genes with low counts are filtered out as they are insignificant in our subsequent analysis. Since there are 4 control samples, 9 MEKi and 11 ERKi samples, we want to only keep genes in at least 4 samples of at least 1 cpm. 
+```{r}
+keep <- rowSums( edgeR::cpm(tbl) > 1 ) >= 4 # only keep the genes with at least 4 samples > 1cpm
+filtered_tbl <- tbl[keep, ] # filtering
+dim(tbl) 
+dim(filtered_tbl) # almost half the genes filtered out
+```
+### Applying TMM 
+TMM is applied to normalise the RNASeq count data.
+```{r}
+d = edgeR::DGEList(counts=filtered_tbl, group=filtered_sampleInfo$`treatment type`)
+d = edgeR::calcNormFactors(d)
+normalised_counts <- edgeR::cpm(d)
+```
+The changes done (filtering and normalising) are visualised below.
+```{r, fig.cap="<b>Figure 1:</b> Boxplots of (1) raw gene counts (2) filtered gene counts and (3) normalised gene counts using edgeR TMM"}
+par(mfrow = c(1, 3))
+boxplot1 <- boxplot(tbl, boxwex=0.7, notch=T, main="GSE228090", ylab="raw gene counts", outline=F, las=2)
+mtext("(1) Raw Gene counts", line=3)
+boxplot2 <- boxplot(filtered_tbl, boxwex=0.7, notch=T, main="GSE228090", ylab="filtered gene counts", outline=F, las=2)
+mtext("(2) Filtered Gene counts", line=3) 
+boxplot3 <- boxplot(normalised_counts, boxwex=0.7, notch=T, main="GSE228090", ylab="normalised gene counts", outline=F, las=2)
+mtext("(3) Normalised Gene counts", line=3)
+par(mfrow = c(1, 1))
+```
+## Initial analysis 
+### Multidimensional scaling (MDS)
+An MDS plot is constructed to visualise the difference in normalised gene counts between the treatment types. There appears to be pretty good separation between the control (DMSO) samples and the ones treated with inhibitors.
+```{r, fig.cap="<b>Figure 2:</b> MDS plots of normalised gene cpm using edgeR TMM"}
+limma::plotMDS(d, pch=1, col = c("blue", "red","darkgreen")[factor(filtered_sampleInfo$`treatment type`)])
+legend("bottomleft", legend = levels(factor(filtered_sampleInfo$`treatment type`)), 
+       col = c("blue", "red", "darkgreen"), pch = 1, title = "Treatment Type")
+```
+### Dispersion analysis
+The dispersion analysis shown below suggests that dispersion is approximately constant across most genes, regardless of the gene cpm. This suggests relatively consistent technical variability.
+```{r, fig.cap="<b>Figure 3:</b> BCV plot of normalised gene cpm using edgeR TMM"}
+model_design <- model.matrix(~filtered_sampleInfo$`treatment type`+filtered_sampleInfo$`cell line`)
+d <- estimateDisp(d, model_design)
+plotBCV(d, col.tagwise = "black", col.common = "red", )
+```
+### Mean-variance analysis
+The plot shows that the data does indeed follow the negative binomial distribution, as seen as the points lying close to the blue line.
+```{r, fig.cap="<b>Figure 4:</b> Mean-variance plot of normalised gene cpm using edgeR TMM"}
+plotMeanVar(d, show.raw.vars = TRUE, show.tagwise.vars = TRUE, NBline = TRUE, show.ave.raw.vars = TRUE, show.binned.common.disp.vars = FALSE)
+```
+The normalised counts are saved locally for easier retrieval subsequently.
+```{r}
+write.table(normalised_counts, file.path(getwd(), paste(acc, "normalised_filtered_RSEM_counts.txt", sep = "_")), quote = FALSE, sep = "\t", row.names = TRUE)
+```
+
+
+## References
+
