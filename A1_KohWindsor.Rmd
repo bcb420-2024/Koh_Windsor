@@ -48,7 +48,7 @@ library(hgnc)
 library(edgeR)
 ```
 ### Brief introduction of study 
-Uveal Melanoma (UM) has no effective treatment once metastatic. UMs frequently exhibit somatic mutations in GNAQ or GNA11 genes [@Chen2014-kv]. In the studythe dataset was obtained from [@Baqai2023-gp], researchers treated GNAQ-mutant UM cell lines with different inhibitors (MEKi or ERKi). They then performed RNA sequencing to elucidate changes in the transcriptome. 
+Uveal Melanoma (UM) has no effective treatment once metastatic. UMs frequently exhibit somatic mutations in GNAQ or GNA11 genes [@Chen2014-kv]. In the study the dataset was obtained from [@Baqai2023-gp], researchers treated GNAQ-mutant UM cell lines with different inhibitors (MEKi or ERKi). They then performed RNA sequencing to elucidate changes in the transcriptome. 
 
 This dataset is of interest to me since I personally suffer from eye related medical conditions. There are also proteomic data associated with this dataset, which would be helpful should I choose to study more and continue further analysis on the proteomic data.
 
