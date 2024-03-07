@@ -1,0 +1,433 @@
+---
+title: "A2_KohWindsor"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    css: "style.css"
+date: "2024-03-10"
+name: Koh Zhi Cong Windsor 
+bibliography: A2_references.bib
+bibliography-style: plain
+#References
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+This notebook was created by _Koh Zhi Cong Windsor_ using his own made Docker image from Homework Assignment 1. Relevant packages are installed. The dataset’s accession number is GSE228090, and was downloaded from GEO. The gene counts (which are normalised and filtered), as well as the sample information are loaded from Assignment 1's operations.
+
+```{r, include=FALSE}
+# Loading necessary packages
+
+if (! requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (! requireNamespace("Biobase", quietly = TRUE)) {
+  BiocManager::install("Biobase")
+}
+
+if (!requireNamespace("edgeR", quietly = TRUE)) {
+  install.packages("edgeR")
+}
+
+library(edgeR)
+library(ComplexHeatmap)
+library(circlize)
+
+acc <- "GSE228090"
+## load normalised gene counts from assignment 1
+file_path <- file.path(getwd(), paste(acc, "normalised_filtered_RSEM_counts.txt", sep = "_"))
+normalised_counts <- read.table(file_path, header = TRUE, sep = "\t", quote = "")
+
+## load sample information from assignment 1
+file_path <- file.path(getwd(), "filtered_sampleInfo.txt")
+sample_info <- read.table(file_path, header = TRUE, sep = "\t", quote = "")
+```
+## Differential Gene Expression
+I wish to find whether adding MEKi and ERKi causes some genes to be differentially expressed. So, there are 6 samples in control, and 12 samples each for MEKi and ERKi. 
+
+There are other factors that affect the gene expression. There are two cell lines, and for each cell line treatment, there are up to 3 replicates, labelled S1 to S3.
+
+In addition, two different MEKi and ERKi are used each (but only one control). 
+
+### MDS
+
+I plot multiple MDS plots to demonstrate my choice of factors in my model. From these plots, the cell line appears to be a major factor that will influence results.
+
+```{r, fig.cap="<b>Figure 1:</b> MDS plot of normalised counts, coloured by treatment type"}
+# Create MDS plot by treatment type
+plotMDS(normalised_counts, labels=NULL, pch = 1, col = c("blue", "red","darkgreen")[factor(sample_info$treatment.type)])
+title(main = "MDS Plot coloured by treatment type")
+legend("bottomleft", legend = levels(factor(sample_info$treatment.type)), 
+       col = c("blue", "red", "darkgreen"), pch = 1, title = "Treatment Type")
+```
+
+
+```{r, fig.cap="<b>Figure 2:</b> MDS plot of normalised counts, coloured by treatment"}
+# Create MDS plot by treatment 
+plotMDS(normalised_counts, labels=NULL, pch = 1, col = c("blue", "red","darkgreen","pink","black")[factor(sample_info$treatment)])
+title(main = "MDS Plot coloured by treatment")
+legend("bottomleft", legend = levels(factor(sample_info$treatment)), 
+       col = c("blue", "red","darkgreen","pink","black"), pch = 1, title = "Treatment")
+```
+
+
+```{r, fig.cap="<b>Figure 3:</b> MDS plot of normalised counts, coloured by cell line"}
+# Create MDS plot by cell line 
+plotMDS(normalised_counts, labels=NULL, pch = 1, col = c("blue", "red")[factor(sample_info$cell.line)])  
+title(main = "MDS Plot coloured by cell line")
+legend("bottomleft", legend = levels(factor(sample_info$cell.line)), 
+       col = c("blue", "red"), pch = 1, title = "Cell line")
+```
+
+```{r, fig.cap="<b>Figure 4:</b> MDS plot of normalised counts, coloured by replicate number"}
+# Create MDS plot by cell line 
+plotMDS(normalised_counts, labels=NULL, pch = 1, col = c("blue", "red", "darkgreen")[factor(sample_info$sample.number)])  
+title(main = "MDS Plot coloured by replicate number")
+legend("bottomleft", legend = levels(factor(sample_info$sample.number)), 
+       col = c("blue", "red", "darkgreen"), pch = 1, title = "Replicate number")
+```
+Since there are three treatment types, I first create two different counts tables, one excluding MEKi (for ERKi vs DMSO comparison), and one excluding ERKi (for MEKi vs DMSO comparison). This will facilitate the linear model fitting subsequently.
+```{r}
+ERKi_and_DMSO <- sample_info[sample_info$treatment.type == "ERKi" | sample_info$treatment.type == "DMSO",]
+normalised_counts_ERKi <- normalised_counts[,rownames(ERKi_and_DMSO)]
+
+MEKi_and_DMSO <- sample_info[sample_info$treatment.type == "MEKi" | sample_info$treatment.type == "DMSO",]
+normalised_counts_MEKi <- normalised_counts[,rownames(MEKi_and_DMSO)]
+```
+
+### Model design
+The model would utilise cell line as well as the treatment type. In other words, the effect of treatment type is corrected for by the differences between the cell lines.
+```{r}
+model_design_ERKi <- model.matrix(~ ERKi_and_DMSO$cell.line + ERKi_and_DMSO$treatment.type)
+model_design_MEKi <- model.matrix(~ MEKi_and_DMSO$cell.line + MEKi_and_DMSO$treatment.type)
+```
+### Model fitting
+EdgeR is used to fit the counts into the model earlier to produce different fits; one for ERKi and one for MEKi.
+```{r}
+d1 = DGEList(counts=normalised_counts_ERKi, group=ERKi_and_DMSO$treatment.type)
+d1 <- estimateDisp(d1, model_design_ERKi)
+fit_ERKi <- glmQLFit(d1, model_design_ERKi)
+
+d2 = DGEList(counts=normalised_counts_MEKi, group=MEKi_and_DMSO$treatment.type)
+d2 <- estimateDisp(d2, model_design_MEKi)
+fit_MEKi <- glmQLFit(d2, model_design_MEKi)
+```
+
+The Quasilikelihood model is used to calculate the genes' differential expression. Since I am comparing the addition of ERKi or MEKi, with reference to the control (DMSO), I then make two separate calculations, one for MEKi and one for ERKi. I note that the top few differentially expressed genes are different for MEKi and for ERKi.
+
+```{r}
+qlf.treatment_typeERKi <- glmQLFTest(fit_ERKi, coef="ERKi_and_DMSO$treatment.typeERKi")
+knitr::kable(topTags(qlf.treatment_typeERKi),type='html',row.names=TRUE)
+qlf.treatment_typeMEKi <- glmQLFTest(fit_MEKi, coef="MEKi_and_DMSO$treatment.typeMEKi")
+knitr::kable(topTags(qlf.treatment_typeMEKi),type='html',row.names=TRUE)
+```
+### Multiple hypothesis testing
+Using the threshold of p-value < 0.05, we can find the number of genes that pass the threshold. About a third of the genes are differentially expressed when either MEKi or ERKi are added.
+By default, using edgeR uses the BH correction method, and thus used for correction. The number of genes passing correction are shown too.
+```{r}
+qlf_output_hits_ERKi <- topTags(qlf.treatment_typeERKi, sort.by = "PValue", n = nrow(normalised_counts_ERKi))
+dim(qlf_output_hits_ERKi$table) # there are a total of 14693 genes
+length(which(qlf_output_hits_ERKi$table$PValue < 0.05)) # number of genes that pass threshold of p-value < 0.05
+length(which(qlf_output_hits_ERKi$table$FDR < 0.05)) # number of genes that pass correction
+
+FDR<-p.adjust(qlf_output_hits_ERKi$table$PValue,method="BH")
+sum(FDR<0.05) # these are the same number of genes as above. This shows FDR is calculated using the BH method.
+
+## Same process for MEKi
+qlf_output_hits_MEKi <- topTags(qlf.treatment_typeMEKi, sort.by = "PValue", n = nrow(normalised_counts_MEKi))
+length(which(qlf_output_hits_MEKi$table$PValue < 0.05)) # number of genes that pass threshold of p-value < 0.05
+length(which(qlf_output_hits_MEKi$table$FDR < 0.05)) # number of genes that pass correction
+```
+### MA Plot
+A MA plot is plotted to compare the log fold change against the mean of the normalised counts. The points in blue are the features that have an adjusted p-value smaller than alpha of 0.05.
+```{r, fig.cap="<b>Figure 5:</b> MA plot of normalised counts for ERKi, with significantly differentially expressed genes in blue"}
+# Calculate log-fold change and average expression level based on fit
+
+# Create MA plot
+plot(qlf.treatment_typeERKi$table$logCPM, qlf.treatment_typeERKi$table$logFC, pch = 16, col = "grey", cex = 0.5, 
+     xlab = "Mean of Normalised Counts", ylab = "Log2 Fold Change",
+     main = "MA Plot for ERKi, alpha = 0.05")
+
+# Add a horizontal line at log-fold change = 0 (no change)
+abline(h = 0, col = "black", lty = 2)
+
+# blue points have p < 0.05
+points(qlf.treatment_typeERKi$table$logCPM[ qlf_output_hits_ERKi$table$PValue < 0.05], 
+       qlf.treatment_typeERKi$table$logFC[qlf_output_hits_ERKi$table$PValue < 0.05], 
+       pch = 16, col = "blue", cex = 0.5)
+
+```
+The process is repeated for MEKi.
+```{r, fig.cap="<b>Figure 6:</b> MA plot of normalised counts for MEKi, with significantly differentially expressed genes in blue"}
+
+# Create MA plot
+plot(qlf.treatment_typeMEKi$table$logCPM, qlf.treatment_typeMEKi$table$logFC, pch = 16, col = "grey", cex = 0.5,
+     xlab = "Mean of Normalised Counts", ylab = "Log2 Fold Change",
+     main = "MA Plot for MEKi, alpha = 0.05")
+
+# Add a horizontal line at log-fold change = 0 (no change)
+abline(h = 0, col = "black", lty = 2)
+
+# blue points have p < 0.05
+points(qlf.treatment_typeMEKi$table$logCPM[qlf_output_hits_MEKi$table$PValue < 0.05], 
+       qlf.treatment_typeMEKi$table$logFC[qlf_output_hits_MEKi$table$PValue < 0.05], 
+       pch = 16, col = "blue", cex = 0.5)
+
+```
+
+### Heatmap
+To find which genes clusters are due to the difference in treatment types, I first find the top hits, which are those genes that are differentially expressed with p value < 0.05 for ERKi vs control (DMSO). These are visualised in an annotated heatmap.
+```{r, fig.cap="<b>Figure 7:</b> Heatmap of differentially expressed genes for ERKi vs control"}
+heatmap_matrix_ERKi <- t(scale(t(normalised_counts_ERKi)))
+top_hits_ERKi <- rownames(qlf_output_hits_ERKi$table)[qlf_output_hits_ERKi$table$PValue<0.05]
+heatmap_matrix_tophits_ERKi <- t(scale(t(heatmap_matrix_ERKi[which(rownames(heatmap_matrix_ERKi) %in% top_hits_ERKi),])))
+# generating colour gradient based on number
+if(min(heatmap_matrix_tophits_ERKi) == 0){
+heatmap_col = colorRamp2(c( 0, max(heatmap_matrix_tophits_ERKi)), c( "white", "red"))
+} else { # blue for negative
+heatmap_col = colorRamp2(c(min(heatmap_matrix_tophits_ERKi), 0,
+max(heatmap_matrix_tophits_ERKi)), c("blue", "white", "red"))
+}
+# creating unique labels for treatment type and cell line
+unique_treatmenttype <- unique(ERKi_and_DMSO$treatment.type)
+unique_treatmenttypecolors <- rainbow(n = length(unique_treatmenttype))
+names(unique_treatmenttypecolors) <- unique_treatmenttype
+unique_cellline <- unique(ERKi_and_DMSO$cell.line)
+unique_celllinecolors <- rainbow(n = length(unique_cellline))
+names(unique_celllinecolors) <- unique_cellline
+
+# creating annotation labels for treatment type and cell line
+ha_pat <- HeatmapAnnotation(df = data.frame(
+treatmenttype = ERKi_and_DMSO$treatment.type,
+cellline = ERKi_and_DMSO$cell.line ),
+col = list(
+treatmenttype = unique_treatmenttypecolors,
+cellline = unique_celllinecolors),
+show_legend = TRUE)
+
+#generation of heatmap
+top_heatmap_ERKi <- Heatmap(as.matrix(heatmap_matrix_tophits_ERKi),
+  top_annotation = ha_pat,
+  cluster_rows = TRUE, cluster_columns = TRUE,
+  show_row_dend = TRUE, show_column_dend = TRUE,
+  col=heatmap_col, show_column_names = FALSE,
+  show_row_names = FALSE, show_heatmap_legend = TRUE, use_raster=TRUE,
+  column_title =("Top hits Control vs ERKi")
+)
+top_heatmap_ERKi
+```
+This process is repeated for MEKi.
+```{r, fig.cap="<b>Figure 8:</b> Heatmap of differentially expressed genes for MEKi vs control"}
+heatmap_matrix_MEKi <- t(scale(t(normalised_counts_MEKi)))
+top_hits_MEKi <- rownames(qlf_output_hits_MEKi$table)[qlf_output_hits_MEKi$table$PValue<0.05]
+heatmap_matrix_tophits_MEKi <- t(scale(t(heatmap_matrix_MEKi[which(rownames(heatmap_matrix_MEKi) %in% top_hits_MEKi),])))
+# generating colour gradient based on number
+if(min(heatmap_matrix_tophits_MEKi) == 0){
+heatmap_col = colorRamp2(c( 0, max(heatmap_matrix_tophits_MEKi)), c( "white", "red"))
+} else { # blue for negative
+heatmap_col = colorRamp2(c(min(heatmap_matrix_tophits_MEKi), 0,
+max(heatmap_matrix_tophits_MEKi)), c("blue", "white", "red"))
+}
+# creating unique labels for treatment type and cell line
+unique_treatmenttype <- unique(MEKi_and_DMSO$treatment.type)
+unique_treatmenttypecolors <- rainbow(n = length(unique_treatmenttype))
+names(unique_treatmenttypecolors) <- unique_treatmenttype
+unique_cellline <- unique(MEKi_and_DMSO$cell.line)
+unique_celllinecolors <- rainbow(n = length(unique_cellline))
+names(unique_celllinecolors) <- unique_cellline
+# sort by treatment type
+heatmap_matrix_tophits_MEKi <- heatmap_matrix_tophits_MEKi[, order(MEKi_and_DMSO$treatment.type)]
+# creating annotation labels for treatment type and cell line
+ha_pat <- HeatmapAnnotation(df = data.frame(
+treatmenttype = MEKi_and_DMSO$treatment.type,
+cellline = MEKi_and_DMSO$cell.line ),
+col = list(
+treatmenttype = unique_treatmenttypecolors,
+cellline = unique_celllinecolors),
+show_legend = TRUE)
+
+#generation of heatmap
+top_heatmap_MEKi <- Heatmap(as.matrix(heatmap_matrix_tophits_MEKi),
+  top_annotation = ha_pat,
+  cluster_rows = TRUE, cluster_columns = TRUE,
+  show_row_dend = TRUE, show_column_dend = TRUE,
+  col=heatmap_col, show_column_names = FALSE,
+  show_row_names = FALSE, show_heatmap_legend = TRUE, use_raster=TRUE,
+  column_title =("Top hits Control vs MEKi")
+)
+top_heatmap_MEKi
+```
+It can be seen that the clustering is more dependent on cell type than treatment type, which makes sense as different cell lines have different basal gene expression levels, and should see different genes being expressed between different cell types. This agrees with the MDS plot earlier, as a large majority of differences lie due to the differences in cell line, with a MDS vector explaining almost 90% of the differences between different cell lines.
+
+## Thresholded over-representation analysis
+I use the thresholded list method of performing this analysis, since it is less complex. I first extract the genes that were over or underexpressed, and store them as variables for easier reference. All the genes that are over or underexpressed when ERKi was added are also over or underexpressed when MEKi is added.
+```{r}
+ERKi_upregulated <- qlf.treatment_typeERKi$table[qlf.treatment_typeERKi$table$PValue < 0.05 & qlf.treatment_typeERKi$table$logFC > 0, ] 
+ERKi_downregulated <- qlf.treatment_typeERKi$table[qlf.treatment_typeERKi$table$PValue < 0.05 & qlf.treatment_typeERKi$table$logFC < 0, ] 
+MEKi_upregulated <- qlf.treatment_typeMEKi$table[qlf.treatment_typeMEKi$table$PValue < 0.05 & qlf.treatment_typeMEKi$table$logFC > 0, ] 
+MEKi_downregulated <- qlf.treatment_typeMEKi$table[qlf.treatment_typeMEKi$table$PValue < 0.05 & qlf.treatment_typeMEKi$table$logFC < 0, ]
+```
+
+After creating the thresholded list of genes, I then save these genes for easier subsequent pathway analysis. 
+```{r}
+dir.create("gprofiler")
+write.table(x=rownames(qlf.treatment_typeERKi$table), file=file.path(getwd(),"gprofiler","ERKi_allgenes.txt"), sep = "\t",row.names = FALSE, col.names = FALSE,quote = FALSE)
+write.table(x=rownames(qlf.treatment_typeMEKi$table), file=file.path(getwd(),"gprofiler","MEKi_allgenes.txt"), sep = "\t",row.names = FALSE, col.names = FALSE,quote = FALSE)
+write.table(x=rownames(ERKi_upregulated), file=file.path(getwd(),"gprofiler","ERKi_upregulated.txt"), sep = "\t",row.names = FALSE, col.names = FALSE,quote = FALSE)
+write.table(x=rownames(ERKi_downregulated), file=file.path(getwd(),"gprofiler","ERKi_downregulated.txt"), sep = "\t",row.names = FALSE, col.names = FALSE,quote = FALSE)
+write.table(x=rownames(MEKi_upregulated), file=file.path(getwd(),"gprofiler","MEKi_upregulated.txt"), sep = "\t",row.names = FALSE, col.names = FALSE,quote = FALSE)
+write.table(x=rownames(MEKi_downregulated), file=file.path(getwd(),"gprofiler","MEKi_downregulated.txt"), sep = "\t",row.names = FALSE, col.names = FALSE,quote = FALSE)
+```
+Then, I load g:profiler using the thresholded list of genes saved earlier. The gmt used is the most recent one as of 6 Mar 2024, e111_eg58_p18_30541362. The thresholds used are from 10 to 500.
+```{r}
+suppressMessages(library(gprofiler2))
+#where to put all the generated files
+working_dir <- file.path(getwd(), "gprofiler")
+
+# where to find the data files needed to run the analysis
+data_dir <-  file.path(getwd(), "gprofiler")
+
+# default max size of the genesets 
+max_gs_size <- 500
+
+# default min size of the genesets 
+min_gs_size <- 10
+
+#min intersection between your genelist and the geneset 
+min_intersection <- 10
+
+# organism parameter used for g:profiler.  
+organism <- "hsapiens"
+
+# the below script will automatically download the latest gmt file from
+# baderlab webstie.   
+dest_gmt_file = ""
+
+getQuerySet <- function(genelist_file) {
+  # takes in the file name containing the list of genes to be used for analysis
+  #load in the file
+  current_genelist <- read.table(file = file.path(data_dir, genelist_file),
+                               header = FALSE, sep = "\t", quote = "",
+                               stringsAsFactors = FALSE)
+  return (current_genelist$V1)
+}
+
+
+```
+I run g:profiler as shown on all differentially expressed genes for ERKi. 
+```{r}
+gprofiler_results <- gost(query = getQuerySet("ERKi_allgenes.txt") ,
+                          significant=FALSE,
+                          ordered_query = FALSE,
+                          exclude_iea=TRUE,
+                          correction_method = "fdr",
+                          organism = organism,
+                          source = c("REAC","WP","GO:BP"))
+ #get the gprofiler results table
+enrichment_results <- gprofiler_results$result
+    
+dim(enrichment_results)
+```
+I repeat this for all gene lists. This shows that running the analysis on all upregulated and downregulated genes separately gives different results than when running together.
+```{r}
+analyzeGenelistFile <- function(genelist_file) {
+  query_set <- getQuerySet(genelist_file)
+  gprofiler_results <- gost(query = query_set,
+                            significant = FALSE,
+                            ordered_query = FALSE,
+                            exclude_iea = TRUE,
+                            correction_method = "fdr",
+                            organism = organism,
+                            source = c("REAC", "WP", "GO:BP"))
+  
+  print(paste(genelist_file, dim(gprofiler_results$result)))
+  return(gprofiler_results$result)
+}
+
+txt_files <- list.files(path = "gprofiler", pattern = "\\.txt$")
+
+# Iterate through each file 
+for (genelist_file in txt_files) {
+  variable_name <- paste0(genelist_file, "_genesets")
+  assign(variable_name, analyzeGenelistFile(genelist_file))
+}
+```
+Of all the genesets, these are the genesets that have p value < 0.05. These are different when calculating for downregulated and upregulated separately. I also find the number of genesets containing the term 'kinase'.
+```{r}
+genelist_file <- ERKi_allgenes.txt_genesets
+print(dim(genelist_file[genelist_file[3] < 0.05, ]))
+print(dim(genelist_file[grep("kinase", genelist_file[, 11], ignore.case = TRUE), ]))
+#knitr::kable(head(genelist_file))
+genelist_file <- ERKi_downregulated.txt_genesets
+print(dim(genelist_file[genelist_file[3] < 0.05, ]))
+print(dim(genelist_file[grep("kinase", genelist_file[, 11], ignore.case = TRUE), ]))
+#knitr::kable(head(genelist_file))
+genelist_file <- ERKi_upregulated.txt_genesets
+print(dim(genelist_file[genelist_file[3] < 0.05, ]))
+print(dim(genelist_file[grep("kinase", genelist_file[, 11], ignore.case = TRUE), ]))
+#knitr::kable(head(genelist_file))
+genelist_file <- MEKi_allgenes.txt_genesets
+print(dim(genelist_file[genelist_file[3] < 0.05, ]))
+print(dim(genelist_file[grep("kinase", genelist_file[, 11], ignore.case = TRUE), ]))
+#knitr::kable(head(genelist_file))
+genelist_file <- MEKi_downregulated.txt_genesets
+print(dim(genelist_file[genelist_file[3] < 0.05, ]))
+print(dim(genelist_file[grep("kinase", genelist_file[, 11], ignore.case = TRUE), ]))
+#knitr::kable(head(genelist_file))
+genelist_file <- MEKi_upregulated.txt_genesets
+print(dim(genelist_file[genelist_file[3] < 0.05, ]))
+print(dim(genelist_file[grep("kinase", genelist_file[, 11], ignore.case = TRUE), ]))
+#knitr::kable(head(genelist_file))
+```
+Note that a specific version of gmt file is used, which is e111_eg58_p18_30541362, and I save this gmt file for future use.
+```{r}
+#the link to the gmt file is static no matter what version
+gprofiler_gmt_url <- 
+  "https://biit.cs.ut.ee/gprofiler/static/gprofiler_full_hsapiens.name.gmt"
+
+#get version info gprofiler as the gmt file is always associated with 
+# a specific version of g:profiler
+gprofiler_version <- get_version_info(organism=organism)
+
+gprofiler_gmt_filename <- file.path(working_dir,
+                                  paste("gprofiler_full", organism,
+                                    gprofiler_version$gprofiler_version,sep="_",
+                                    ".name.gmt"))
+
+if(!file.exists(gprofiler_gmt_filename)){
+  download.file(url = gprofiler_gmt_url, 
+              destfile = gprofiler_gmt_filename)
+}
+
+#load in the g:profiler geneset file
+suppressMessages(library(GSA))
+capt_output <- capture.output(genesets_gprofiler <- GSA.read.gmt(
+                                      filename = gprofiler_gmt_filename))
+
+names(genesets_gprofiler$genesets) <- genesets_gprofiler$geneset.names
+
+#preserve the database version so revisiting these results in future 
+#leads to same results. done by creating symbolic link
+if(length(grep(x = list.files(file.path(working_dir)), 
+              pattern = "gprofiler_full_hsapiens.name.gmt",
+              fixed = TRUE) > 0 )){
+  file.remove(file.path(working_dir, "gprofiler_full_hsapiens.name.gmt"))
+}
+
+file.symlink( gprofiler_gmt_filename,file.path(working_dir, 
+                                   "gprofiler_full_hsapiens.name.gmt"))
+
+```
+## Interpretation
+The over-representation results support conclusions or mechanism discussed in the original paper. There are many kinase related genesets that are over-represented according to the results earlier, which agree with the paper, which essentially found many different kinases that are overrepresented and have the potential for uveal melanoma treatment. The paper went and used different methods to further select which particular kinases to further research on, such as RPPA.
+
+I can find evidence, i.e. publications, to support some of the results that I see. The research papers [@Essegian_Khurana_Stathias_Schurer_2020], [@Kurimchak_Herrera-Montavez_Brown_Johnson_Sodi_Srivastava_Kumar_Deihimi_OBrien_Peri_etal_2020] and [@Baqai_Kurimchak_Trachtenberg_Purwin_Haj_Han_Luo_Pachon_Jeon_Chua_etal_2023] all go to show that kinase activity is important and relevant in cancer treatments.
+
+## References
+
